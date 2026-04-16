@@ -1,61 +1,93 @@
-"""AI service functions for Claude integration."""
+"""AI service functions for Gemini integration."""
 
+import asyncio
+import json
 import os
 
-from anthropic import Anthropic
 from dotenv import load_dotenv
+import google.generativeai as genai
 
 load_dotenv()
 
 
-def _get_claude_client() -> Anthropic:
-    """Build Anthropic client from environment configuration."""
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+async def _get_gemini_model() -> genai.GenerativeModel:
+    """Build Gemini model from environment configuration."""
+    api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY is not set in environment variables")
-    return Anthropic(api_key=api_key)
+        raise ValueError("GEMINI_API_KEY is not set in environment variables")
+
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel(
+        model_name="gemini-1.5-flash",
+        system_instruction=(
+            "You are a Senior Credit Underwriter. Analyze borrower and loan document text "
+            "for credit risk and affordability. You must respond with STRICT JSON only. "
+            "Do not include markdown, explanations, or extra keys."
+        ),
+    )
+
+
+async def _validate_analysis_payload(payload: dict) -> dict:
+    """Validate required analysis fields and allowed enum values."""
+    required_keys = {"risk_score", "decision", "reason", "suggested_amount"}
+    missing_keys = required_keys.difference(payload.keys())
+    if missing_keys:
+        raise ValueError(f"Gemini response missing keys: {sorted(missing_keys)}")
+
+    if payload["risk_score"] not in {"Low", "Med", "High"}:
+        raise ValueError("risk_score must be one of: Low, Med, High")
+
+    if payload["decision"] not in {"Approved", "Rejected"}:
+        raise ValueError("decision must be one of: Approved, Rejected")
+
+    return payload
 
 
 async def analyze_loan_document(text: str) -> dict:
-    """Analyze extracted loan document text with Claude."""
+    """Analyze extracted loan document text with Gemini and return strict JSON."""
     if not text.strip():
         raise ValueError("Document text is empty")
 
-    client = _get_claude_client()
+    model = await _get_gemini_model()
     prompt = (
-        "You are a loan risk analysis assistant. "
-        "Review the following extracted loan application text and return concise JSON with keys "
-        "risk_level, summary, and recommendation.\n\n"
+        "Analyze the following extracted loan application text and return STRICT JSON only with this exact schema:\n"
+        "{\n"
+        '  "risk_score": "Low|Med|High",\n'
+        '  "decision": "Approved|Rejected",\n'
+        '  "reason": "short explanation",\n'
+        '  "suggested_amount": 0\n'
+        "}\n\n"
+        "Rules:\n"
+        "- Output must be valid JSON object only.\n"
+        "- No markdown code fences.\n"
+        "- No additional keys.\n\n"
         f"Document Text:\n{text}"
     )
 
-    message = client.messages.create(
-        model="claude-3-5-sonnet-latest",
-        max_tokens=700,
-        temperature=0.2,
-        messages=[
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        ],
-    )
+    try:
+        response = await asyncio.to_thread(
+            model.generate_content,
+            prompt,
+            generation_config={
+                "temperature": 0.1,
+                "max_output_tokens": 500,
+                "response_mime_type": "application/json",
+            },
+        )
+    except Exception as exc:
+        raise ValueError(f"Gemini request failed: {exc}") from exc
 
-    response_text = ""
-    if message.content:
-        first_block = message.content[0]
-        response_text = getattr(first_block, "text", "")
+    response_text = (getattr(response, "text", "") or "").strip()
+    if not response_text:
+        raise ValueError("Gemini returned an empty response")
 
+    try:
+        parsed = json.loads(response_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Gemini returned non-JSON output: {response_text}") from exc
+
+    validated = await _validate_analysis_payload(parsed)
     return {
-        "model": "claude-3-5-sonnet-latest",
-        "analysis": response_text,
+        "model": "gemini-1.5-flash",
+        "analysis": validated,
     }
-
-
-async def analyze_with_claude(prompt: str) -> dict:
-    """Analyze application data with Claude.
-
-    TODO: Implement Anthropic API integration.
-    """
-    _ = prompt
-    pass

@@ -11,9 +11,12 @@ async def extract_text_from_pdf(file_content: bytes) -> str:
         raise ValueError("Uploaded PDF is empty")
 
     extracted_pages: list[str] = []
-    with pdfplumber.open(BytesIO(file_content)) as pdf:
-        for page in pdf.pages:
-            extracted_pages.append(page.extract_text() or "")
+    try:
+        with pdfplumber.open(BytesIO(file_content)) as pdf:
+            for page in pdf.pages:
+                extracted_pages.append(page.extract_text() or "")
+    except Exception as exc:
+        raise ValueError(f"Failed to parse PDF: {exc}") from exc
 
     extracted_text = "\n".join(extracted_pages).strip()
     if not extracted_text:
